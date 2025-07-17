@@ -43,9 +43,72 @@ def webhook():
 
         reply_token = event["replyToken"]
         text = event["message"]["text"].strip()
-        lines = text.split("\n")
 
-        # ลองแปลงบรรทัดแรกเป็นวันที่ ถ้าไม่ได้ → ใช้วันนี้
+        # ✅ สรุปช่วงวันที่ เช่น: 1 Jul 2025 - 31 Jul 2025
+        if " - " in text and len(text.split("\n")) == 1:
+            try:
+                d1_str, d2_str = text.split("-")
+                d1 = datetime.strptime(d1_str.strip(), "%d %b %Y")
+                d2 = datetime.strptime(d2_str.strip(), "%d %b %Y")
+                d1_iso = d1.strftime("%Y-%m-%d")
+                d2_iso = d2.strftime("%Y-%m-%d")
+                conn = sqlite3.connect("ingredients.db")
+                df = pd.read_sql_query(
+                    "SELECT item, quantity FROM ingredients WHERE date BETWEEN ? AND ?",
+                    conn,
+                    params=(d1_iso, d2_iso)
+                )
+                conn.close()
+
+                if df.empty:
+                    reply_text(reply_token, f"📍 ไม่มีข้อมูลในช่วง {d1.strftime('%d-%m-%Y')} ถึง {d2.strftime('%d-%m-%Y')}")
+                    return "no data", 200
+
+                df[["qty", "unit"]] = df["quantity"].str.extract(r"(\d+(?:\.\d+)?)\s*(.+)")
+                df["qty"] = df["qty"].astype(float)
+                summary = df.groupby(["item", "unit"])["qty"].sum().reset_index()
+
+                reply = [f"📦 สรุปวัตถุดิบ {d1.strftime('%d-%m-%Y')} ถึง {d2.strftime('%d-%m-%Y')}:"]
+                for _, row in summary.iterrows():
+                    reply.append(f"- {row['item']} {row['qty']:,.0f} {row['unit']}")
+                reply_text(reply_token, "\n".join(reply))
+                return "summary ok", 200
+            except:
+                reply_text(reply_token, "❌ รูปแบบไม่ถูกต้อง เช่น: 1 Jul 2025 - 31 Jul 2025")
+                return "invalid range", 200
+
+        # ✅ export
+        if text.lower() == "export":
+            reply_text(reply_token, f"📦 ดาวน์โหลดวัตถุดิบ:\nhttps://{request.host}/export")
+            return "export sent", 200
+
+        # ✅ ลบ 26 Jul 2025 หรือ ลบ 26 Jul 2025 ไข่
+        if text.lower().startswith("ลบ "):
+            parts = text[4:].strip().split(" ", 1)
+            try:
+                date_obj = datetime.strptime(parts[0], "%d %b %Y")
+                date_str = date_obj.strftime("%Y-%m-%d")
+                item_filter = parts[1].strip() if len(parts) > 1 else None
+
+                conn = sqlite3.connect("ingredients.db")
+                cursor = conn.cursor()
+
+                if item_filter:
+                    cursor.execute("DELETE FROM ingredients WHERE date=? AND item=?", (date_str, item_filter))
+                    msg = f"🗑️ ลบ '{item_filter}' ของวันที่ {date_obj.strftime('%d-%m-%Y')} แล้ว"
+                else:
+                    cursor.execute("DELETE FROM ingredients WHERE date=?", (date_str,))
+                    msg = f"🗑️ ลบข้อมูลทั้งหมดของวันที่ {date_obj.strftime('%d-%m-%Y')} แล้ว"
+
+                conn.commit()
+                conn.close()
+                reply_text(reply_token, msg)
+            except:
+                reply_text(reply_token, "❌ รูปแบบวันที่ไม่ถูกต้อง เช่น:\nลบ 26 Jul 2025\nลบ 26 Jul 2025 หมู")
+            return "ok", 200
+
+        # ✅ แยกวันที่ (ถ้ามี) จากบรรทัดแรก
+        lines = text.split("\n")
         try:
             date_obj = datetime.strptime(lines[0], "%d %b %Y")
             date_str = date_obj.strftime("%Y-%m-%d")
@@ -56,7 +119,7 @@ def webhook():
             date_str = date_obj.strftime("%Y-%m-%d")
             date_display = date_obj.strftime("%d-%m-%Y")
 
-        # อ่านรายการวัตถุดิบ
+        # ✅ แปลงเป็นรายการวัตถุดิบ
         records = []
         for line in lines:
             parts = line.strip().rsplit(" ", 2)
@@ -65,10 +128,10 @@ def webhook():
                 records.append((item, f"{qty} {unit}", date_str, datetime.now().isoformat()))
 
         if not records:
-            reply_text(reply_token, "❌ กรุณาพิมพ์รูปแบบ: หมู 5 กก หรือ\n26 Jul 2025\nไข่ 30 ฟอง")
+            reply_text(reply_token, "❌ กรุณาพิมพ์: หมู 5 กก หรือ\n26 Jul 2025\nไข่ 30 ฟอง")
             return "invalid", 200
 
-        # บันทึก
+        # ✅ บันทึกข้อมูล
         conn = sqlite3.connect("ingredients.db")
         conn.executemany(
             "INSERT INTO ingredients (item, quantity, date, created_at) VALUES (?, ?, ?, ?)",
@@ -76,7 +139,7 @@ def webhook():
         )
         conn.commit()
 
-        # ดึงรายการทั้งหมดของวันนั้น
+        # ✅ ดึงข้อมูลทั้งหมดของวันนั้น
         df = pd.read_sql_query(
             "SELECT item, quantity FROM ingredients WHERE date = ? ORDER BY created_at",
             conn,
@@ -84,11 +147,11 @@ def webhook():
         )
         conn.close()
 
-        # ตอบกลับ
-        lines = [f"📅 วัตถุดิบวันที่ {date_display}:"]
+        reply_lines = [f"📅 วัตถุดิบวันที่ {date_display}:"]
         for _, row in df.iterrows():
-            lines.append(f"- {row['item']} {row['quantity']}")
-        reply_text(reply_token, "\n".join(lines))
+            reply_lines.append(f"- {row['item']} {row['quantity']}")
+        reply_text(reply_token, "\n".join(reply_lines))
+
     return "ok", 200
 
 @app.route("/export")
