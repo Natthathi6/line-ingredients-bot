@@ -43,26 +43,20 @@ def webhook():
 
         reply_token = event["replyToken"]
         text = event["message"]["text"].strip()
-
-        # ✅ ถ้าพิมพ์ export → ส่งลิงก์ดาวน์โหลด
-        if "export" in text.lower():
-            reply_text(reply_token, f"📦 ดาวน์โหลดวัตถุดิบ:\nhttps://{request.host}/export")
-            return "export link sent", 200
-
         lines = text.split("\n")
 
-        # 🔍 พยายามแปลงบรรทัดแรกเป็นวันที่ (ถ้าใส่)
+        # ลองแปลงบรรทัดแรกเป็นวันที่ ถ้าไม่ได้ → ใช้วันนี้
         try:
             date_obj = datetime.strptime(lines[0], "%d %b %Y")
             date_str = date_obj.strftime("%Y-%m-%d")
             date_display = date_obj.strftime("%d-%m-%Y")
-            lines = lines[1:]  # ลบวันที่ออก
+            lines = lines[1:]
         except:
             date_obj = datetime.now()
             date_str = date_obj.strftime("%Y-%m-%d")
             date_display = date_obj.strftime("%d-%m-%Y")
 
-        # 📌 สร้างรายการวัตถุดิบ
+        # อ่านรายการวัตถุดิบ
         records = []
         for line in lines:
             parts = line.strip().rsplit(" ", 2)
@@ -71,24 +65,30 @@ def webhook():
                 records.append((item, f"{qty} {unit}", date_str, datetime.now().isoformat()))
 
         if not records:
-            reply_text(reply_token, "❌ กรุณาพิมพ์: หมู 5 กก หรือ\n26 Jul 2025\nไข่ 30 ฟอง")
+            reply_text(reply_token, "❌ กรุณาพิมพ์รูปแบบ: หมู 5 กก หรือ\n26 Jul 2025\nไข่ 30 ฟอง")
             return "invalid", 200
 
-        # 💾 บันทึกลง DB
+        # บันทึก
         conn = sqlite3.connect("ingredients.db")
         conn.executemany(
             "INSERT INTO ingredients (item, quantity, date, created_at) VALUES (?, ?, ?, ?)",
             records
         )
         conn.commit()
+
+        # ดึงรายการทั้งหมดของวันนั้น
+        df = pd.read_sql_query(
+            "SELECT item, quantity FROM ingredients WHERE date = ? ORDER BY created_at",
+            conn,
+            params=(date_str,)
+        )
         conn.close()
 
-        # ✉️ ตอบกลับรายการที่บันทึก
-        reply_lines = [f"📅 บันทึกวัตถุดิบวันที่ {date_display}"]
-        for r in records:
-            reply_lines.append(f"- {r[0]} {r[1]}")
-        reply_text(reply_token, "\n".join(reply_lines))
-
+        # ตอบกลับ
+        lines = [f"📅 วัตถุดิบวันที่ {date_display}:"]
+        for _, row in df.iterrows():
+            lines.append(f"- {row['item']} {row['quantity']}")
+        reply_text(reply_token, "\n".join(lines))
     return "ok", 200
 
 @app.route("/export")
