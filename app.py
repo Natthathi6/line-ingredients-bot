@@ -50,9 +50,14 @@ def webhook():
             filename = "ingredients_export.xlsx"
             conn = sqlite3.connect("ingredients.db")
             df = pd.read_sql_query("SELECT item, quantity, date FROM ingredients ORDER BY date DESC", conn)
-            df.to_excel(filename, index=False)
             conn.close()
 
+            # แยก quantity เป็น amount และ unit
+            df[["amount", "unit"]] = df["quantity"].str.extract(r"(\d+(?:\.\d+)?)\s*(.+)")
+            df["amount"] = df["amount"].astype(float)
+            df = df[["item", "amount", "unit", "date"]]
+
+            df.to_excel(filename, index=False)
             reply_text(reply_token, "📦 ดาวน์โหลดวัตถุดิบ: https://line-ingredients-bot.onrender.com/download")
             return "ok", 200
 
@@ -138,7 +143,6 @@ def webhook():
         conn.executemany("INSERT INTO ingredients (item, quantity, date, created_at) VALUES (?, ?, ?, ?)", records)
         conn.commit()
 
-        # ตอบกลับรวมของวันนั้น
         all_rows = conn.execute("SELECT item, quantity FROM ingredients WHERE date = ?", (date_str,)).fetchall()
         conn.close()
 
