@@ -4,7 +4,6 @@ import sqlite3
 from datetime import datetime
 import requests
 import pandas as pd
-import re
 
 app = Flask(__name__)
 LINE_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
@@ -27,12 +26,19 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             item TEXT,
             quantity TEXT,
+            unit TEXT,
             date TEXT,
             created_at TEXT
         )
     """)
     conn.commit()
     conn.close()
+
+def parse_date(line):
+    try:
+        return datetime.strptime(line.strip(), "%d %b %Y")
+    except:
+        return None
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -44,121 +50,109 @@ def webhook():
 
         reply_token = event["replyToken"]
         text = event["message"]["text"].strip()
+        lines = text.split("\n")
 
-        # 1. EXPORT
-        if text.lower() == "export":
-            filename = "ingredients_export.xlsx"
-            conn = sqlite3.connect("ingredients.db")
-            df = pd.read_sql_query("SELECT item, quantity, date FROM ingredients ORDER BY date DESC", conn)
-            conn.close()
-
-            # แยก quantity เป็น amount และ unit
-            df[["amount", "unit"]] = df["quantity"].str.extract(r"(\d+(?:\.\d+)?)\s*(.+)")
-            df["amount"] = df["amount"].astype(float)
-            df = df[["item", "amount", "unit", "date"]]
-
-            df.to_excel(filename, index=False)
-            reply_text(reply_token, "📦 ดาวน์โหลดวัตถุดิบ: https://line-ingredients-bot.onrender.com/download")
-            return "ok", 200
-
-        # 2. DELETE
-        delete_match = re.match(r"^ลบ (\d{1,2} \w+ \d{4})(?: (.+))?$", text)
-        if delete_match:
+        # ลบข้อมูล
+        if text.lower().startswith("ลบ "):
+            parts = text[4:].strip().split(" ", 1)
             try:
-                date_obj = datetime.strptime(delete_match.group(1), "%d %b %Y")
+                date_obj = datetime.strptime(parts[0], "%d %b %Y")
                 date_str = date_obj.strftime("%Y-%m-%d")
-                item = delete_match.group(2)
-
                 conn = sqlite3.connect("ingredients.db")
-                if item:
-                    cur = conn.execute("DELETE FROM ingredients WHERE date = ? AND item = ?", (date_str, item))
+                if len(parts) == 2:
+                    item = parts[1].strip()
+                    result = conn.execute("DELETE FROM ingredients WHERE date = ? AND item = ?", (date_str, item))
                 else:
-                    cur = conn.execute("DELETE FROM ingredients WHERE date = ?", (date_str,))
-                deleted = cur.rowcount
+                    result = conn.execute("DELETE FROM ingredients WHERE date = ?", (date_str,))
+                count = result.rowcount
                 conn.commit()
                 conn.close()
-
-                if deleted > 0:
-                    reply_text(reply_token, f"✅ ลบ{'รายการ ' + item if item else 'ทั้งหมด'}ของวันที่ {date_str} แล้ว")
-                else:
-                    reply_text(reply_token, f"⚠️ ไม่พบข้อมูลของวันที่ {date_str}")
-                return "ok", 200
+                reply_text(reply_token, f"🗑️ ลบข้อมูล {count} รายการสำเร็จ")
             except:
                 reply_text(reply_token, "❌ รูปแบบวันที่ไม่ถูกต้อง เช่น:\nลบ 26 Jul 2025\nลบ 26 Jul 2025 หมู")
-                return "ok", 200
+            return "ok", 200
 
-        # 3. SUMMARY
-        summary_match = re.match(r"^(\d{1,2} \w+ \d{4}) - (\d{1,2} \w+ \d{4})$", text)
-        if summary_match:
+        # สรุปช่วงวัน
+        if "-" in text:
             try:
-                start_date = datetime.strptime(summary_match.group(1), "%d %b %Y").strftime("%Y-%m-%d")
-                end_date = datetime.strptime(summary_match.group(2), "%d %b %Y").strftime("%Y-%m-%d")
-
+                start_text, end_text = text.split("-")
+                start_date = datetime.strptime(start_text.strip(), "%d %b %Y").strftime("%Y-%m-%d")
+                end_date = datetime.strptime(end_text.strip(), "%d %b %Y").strftime("%Y-%m-%d")
                 conn = sqlite3.connect("ingredients.db")
-                rows = conn.execute("SELECT item, quantity FROM ingredients WHERE date BETWEEN ? AND ?", (start_date, end_date)).fetchall()
+                df = pd.read_sql_query("""
+                    SELECT item, quantity, unit FROM ingredients
+                    WHERE date BETWEEN ? AND ?
+                """, conn, params=(start_date, end_date))
                 conn.close()
 
-                if not rows:
-                    reply_text(reply_token, "😔 ไม่พบข้อมูลในช่วงที่ระบุ")
-                    return "ok", 200
-
-                summary = {}
-                for item, qty in rows:
-                    summary.setdefault(item, []).append(qty)
-
-                lines = [f"📦 สรุปวัตถุดิบ {start_date} ถึง {end_date}:"]
-                for item, qtys in summary.items():
-                    lines.append(f"- {item} {' + '.join(qtys)}")
-
-                reply_text(reply_token, "\n".join(lines))
+                if df.empty:
+                    reply_text(reply_token, f"📦 ไม่พบข้อมูลระหว่าง {start_date} ถึง {end_date}")
+                else:
+                    summary = df.groupby(["item", "unit"]).agg({"quantity": lambda x: " + ".join(x)}).reset_index()
+                    msg = f"📦 สรุปวัตถุดิบ {start_date} ถึง {end_date}:\n"
+                    for _, row in summary.iterrows():
+                        msg += f"- {row['item']} {row['quantity']} {row['unit']}\n"
+                    reply_text(reply_token, msg.strip())
                 return "ok", 200
             except:
-                reply_text(reply_token, "❌ รูปแบบไม่ถูกต้อง เช่น:\n1 Jul 2025 - 31 Jul 2025")
-                return "ok", 200
+                pass
 
-        # 4. SAVE INGREDIENTS
-        lines = text.split("\n")
+        # export
+        if text.lower() == "export":
+            conn = sqlite3.connect("ingredients.db")
+            df = pd.read_sql_query("SELECT item, quantity, unit, date FROM ingredients ORDER BY date DESC", conn)
+            conn.close()
+            filename = "ingredients_export.xlsx"
+            df.to_excel(filename, index=False)
+            return send_file(filename, as_attachment=True)
+
+        # วันจากข้อความ
         try:
-            date_obj = datetime.strptime(lines[0], "%d %b %Y")
-            date_str = date_obj.strftime("%Y-%m-%d")
-            date_display = date_obj.strftime("%d-%m-%Y")
-            lines = lines[1:]
+            date_obj = parse_date(lines[0])
+            if date_obj:
+                date_str = date_obj.strftime("%Y-%m-%d")
+                date_display = date_obj.strftime("%d-%m-%Y")
+                lines = lines[1:]
+            else:
+                raise ValueError
         except:
             date_obj = datetime.now()
             date_str = date_obj.strftime("%Y-%m-%d")
             date_display = date_obj.strftime("%d-%m-%Y")
 
-        records = []
+        # อ่านข้อมูล
+        records, errors = [], []
         for line in lines:
             parts = line.strip().rsplit(" ", 2)
-            if len(parts) == 3:
-                item, qty, unit = parts
-                records.append((item, f"{qty} {unit}", date_str, datetime.now().isoformat()))
+            if len(parts) != 3 or line.count(" ") > 2:
+                errors.append(line)
+                continue
+            item, qty, unit = parts
+            records.append((item.strip(), qty.strip(), unit.strip(), date_str, datetime.now().isoformat()))
 
         if not records:
             reply_text(reply_token, "❌ กรุณาพิมพ์รูปแบบ: หมู 5 กก หรือ\n26 Jul 2025\nไข่ 30 ฟอง")
-            return "ok", 200
+            return "invalid", 200
 
+        # บันทึกลงฐานข้อมูล
         conn = sqlite3.connect("ingredients.db")
-        conn.executemany("INSERT INTO ingredients (item, quantity, date, created_at) VALUES (?, ?, ?, ?)", records)
+        conn.executemany("INSERT INTO ingredients (item, quantity, unit, date, created_at) VALUES (?, ?, ?, ?, ?)", records)
         conn.commit()
-
-        all_rows = conn.execute("SELECT item, quantity FROM ingredients WHERE date = ?", (date_str,)).fetchall()
         conn.close()
 
-        lines = [f"📅 บันทึกวัตถุดิบวันที่ {date_display}"]
-        for r in all_rows:
-            lines.append(f"- {r[0]} {r[1]}")
-        reply_text(reply_token, "\n".join(lines))
-    return "ok", 200
+        # ตอบกลับ
+        msg = f"📅 บันทึกวัตถุดิบวันที่ {date_display}\n"
+        for r in records:
+            msg += f"- {r[0]} {r[1]} {r[2]}\n"
+        if errors:
+            msg += "\n⚠️ ไม่ได้บันทึกรายการ:\n" + "\n".join(f"- {e}" for e in errors)
+        reply_text(reply_token, msg.strip())
 
-@app.route("/download")
-def download():
-    return send_file("ingredients_export.xlsx", as_attachment=True)
+    return "ok", 200
 
 @app.route("/")
 def index():
-    return "✅ LINE Ingredients Bot is running!"
+    return "✅ LINE Bot วัตถุดิบทำงานแล้ว!"
 
 if __name__ == "__main__":
     init_db()
