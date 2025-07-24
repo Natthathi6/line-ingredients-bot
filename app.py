@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file
+from flask import Flask, request, send_file, url_for
 import os
 import sqlite3
 from datetime import datetime
@@ -45,6 +45,13 @@ def webhook():
 
         reply_token = event["replyToken"]
         text = event["message"]["text"].strip()
+        
+        if text.lower() == "export":
+            # สร้างลิงก์ดาวน์โหลด (กรณี Render ให้ใช้ URL จริงของแอป)
+            download_link = "https://line-ingredients-bot.onrender.com/export"
+            reply_text(reply_token, f"📦 ดาวน์โหลดไฟล์วัตถุดิบ:\n{download_link}")
+            return "export sent", 200
+
         lines = text.split("\n")
 
         # ตรวจสอบวันที่
@@ -75,13 +82,11 @@ def webhook():
             reply_text(reply_token, "❌ กรุณาพิมพ์รูปแบบ: หมู 5 กก หรือ\n26 Jul 2025\nไข่ 30 ฟอง")
             return "no valid lines", 200
 
-        # บันทึก
         conn = sqlite3.connect("ingredients.db")
         conn.executemany("INSERT INTO ingredients (item, quantity, unit, date, created_at) VALUES (?, ?, ?, ?, ?)", records)
         conn.commit()
         conn.close()
 
-        # ตอบกลับ
         lines = [f"📅 บันทึกวัตถุดิบวันที่ {date_display}"]
         for r in records:
             lines.append(f"- {r[0]} {r[1]} {r[2]}")
