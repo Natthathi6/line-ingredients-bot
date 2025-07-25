@@ -1,4 +1,4 @@
-from flask import Flask, request, send_file, url_for
+from flask import Flask, request, send_file
 import os
 import sqlite3
 from datetime import datetime
@@ -45,16 +45,52 @@ def webhook():
 
         reply_token = event["replyToken"]
         text = event["message"]["text"].strip()
-        
-        if text.lower() == "export":
-            # สร้างลิงก์ดาวน์โหลด (กรณี Render ให้ใช้ URL จริงของแอป)
-            download_link = "https://line-ingredients-bot.onrender.com/export"
-            reply_text(reply_token, f"📦 ดาวน์โหลดไฟล์วัตถุดิบ:\n{download_link}")
-            return "export sent", 200
-
         lines = text.split("\n")
 
-        # ตรวจสอบวันที่
+        # ลบข้อมูล
+        if text.startswith("ลบ"):
+            try:
+                parts = text[3:].strip().split()
+                date_obj = datetime.strptime(" ".join(parts[:3]), "%d %b %Y")
+                date_str = date_obj.strftime("%Y-%m-%d")
+                conn = sqlite3.connect("ingredients.db")
+                if len(parts) > 3:
+                    item = " ".join(parts[3:])
+                    conn.execute("DELETE FROM ingredients WHERE date=? AND item=?", (date_str, item))
+                    reply_text(reply_token, f"🗑️ ลบ {item} วันที่ {date_obj.strftime('%d-%m-%Y')} แล้ว")
+                else:
+                    conn.execute("DELETE FROM ingredients WHERE date=?", (date_str,))
+                    reply_text(reply_token, f"🗑️ ลบข้อมูลวันที่ {date_obj.strftime('%d-%m-%Y')} แล้ว")
+                conn.commit()
+                conn.close()
+                return "deleted", 200
+            except:
+                reply_text(reply_token, "❌ รูปแบบผิด เช่น: ลบ 26 Jul 2025 หรือ ลบ 26 Jul 2025 หมู")
+                return "invalid", 200
+
+        # รวมข้อมูลช่วงวันที่
+        if re.match(r"^\d{1,2} \w{3} \d{4}\s*-\s*\d{1,2} \w{3} \d{4}$", text):
+            try:
+                d1_str, d2_str = [s.strip() for s in text.split("-")]
+                d1 = datetime.strptime(d1_str, "%d %b %Y")
+                d2 = datetime.strptime(d2_str, "%d %b %Y")
+                conn = sqlite3.connect("ingredients.db")
+                df = pd.read_sql_query("SELECT item, quantity, unit FROM ingredients WHERE date BETWEEN ? AND ?", conn, params=(d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d")))
+                if df.empty:
+                    reply_text(reply_token, "📍 ไม่พบข้อมูลในช่วงวันที่ที่ระบุ")
+                    return "no data", 200
+                df["full"] = df["item"] + " (" + df["unit"] + ")"
+                summary = df.groupby("full")["quantity"].apply(lambda x: ", ".join(x)).reset_index()
+                reply = [f"📊 สรุปวัตถุดิบ {d1.strftime('%d/%m')} - {d2.strftime('%d/%m')}:"]
+                for _, row in summary.iterrows():
+                    reply.append(f"- {row['full']}: {row['quantity']}")
+                reply_text(reply_token, "\n".join(reply))
+                return "summary", 200
+            except:
+                reply_text(reply_token, "❌ รูปแบบผิด เช่น: 1 Jul 2025 - 31 Jul 2025")
+                return "invalid", 200
+
+        # ตรวจสอบวันที่นำหน้า
         try:
             date_obj = datetime.strptime(lines[0], "%d %b %Y")
             date_str = date_obj.strftime("%Y-%m-%d")
@@ -65,36 +101,32 @@ def webhook():
             date_str = date_obj.strftime("%Y-%m-%d")
             date_display = date_obj.strftime("%d-%m-%Y")
 
+        # ตรวจสอบและบันทึก
         records = []
-        skipped_lines = []
+        skipped = []
         for line in lines:
             parts = line.strip().rsplit(" ", 2)
-            if len(parts) == 3:
+            if len(parts) == 3 and line.count(" ") == 2 and re.match(r"^\d+(\.\d+)?$", parts[1]):
                 item, qty, unit = parts
-                if line.count(" ") <= 2 and re.match(r"^\d+(\.\d+)?$", qty):
-                    records.append((item, qty, unit, date_str, datetime.now().isoformat()))
-                else:
-                    skipped_lines.append(line)
+                records.append((item.strip(), qty.strip(), unit.strip(), date_str, datetime.now().isoformat()))
             else:
-                skipped_lines.append(line)
+                skipped.append(line)
 
         if not records:
             reply_text(reply_token, "❌ กรุณาพิมพ์รูปแบบ: หมู 5 กก หรือ\n26 Jul 2025\nไข่ 30 ฟอง")
-            return "no valid lines", 200
+            return "invalid", 200
 
         conn = sqlite3.connect("ingredients.db")
         conn.executemany("INSERT INTO ingredients (item, quantity, unit, date, created_at) VALUES (?, ?, ?, ?, ?)", records)
         conn.commit()
         conn.close()
 
-        lines = [f"📅 บันทึกวัตถุดิบวันที่ {date_display}"]
-        for r in records:
-            lines.append(f"- {r[0]} {r[1]} {r[2]}")
-        if skipped_lines:
-            lines.append("\n❌ ไม่สามารถบันทึก:")
-            lines += [f"- {l}" for l in skipped_lines]
-
-        reply_text(reply_token, "\n".join(lines))
+        reply = [f"📅 บันทึกวัตถุดิบวันที่ {date_display}"]
+        reply += [f"- {r[0]} {r[1]} {r[2]}" for r in records]
+        if skipped:
+            reply.append("\n❌ ไม่สามารถบันทึก:")
+            reply += [f"- {l}" for l in skipped]
+        reply_text(reply_token, "\n".join(reply))
     return "ok", 200
 
 @app.route("/export")
