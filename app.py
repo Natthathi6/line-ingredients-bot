@@ -9,6 +9,7 @@ from collections import defaultdict
 
 app = Flask(__name__)
 LINE_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
+DOMAIN = os.environ.get("DOMAIN", "https://your-render-url.com")  # <-- ใส่ domain ของคุณที่นี่
 
 def reply_text(reply_token, text):
     headers = {
@@ -54,7 +55,17 @@ def webhook():
         text = event["message"]["text"].strip()
         lines = text.split("\n")
 
-        # ลบข้อมูล
+        # ✅ Export
+        if text.lower() == "export":
+            filename = "ingredients_export.xlsx"
+            conn = sqlite3.connect("ingredients.db")
+            df = pd.read_sql_query("SELECT item, quantity, unit, date FROM ingredients ORDER BY date DESC", conn)
+            conn.close()
+            df.to_excel(filename, index=False)
+            reply_text(reply_token, f"📎 ดาวน์โหลดวัตถุดิบ: {DOMAIN}/{filename}")
+            return "ok", 200
+
+        # ✅ ลบข้อมูล
         if text.lower().startswith("ลบ"):
             match = re.match(r"ลบ\s+(\d{1,2} \w{3} \d{4})(?:\s+(.*))?", text)
             if not match:
@@ -77,14 +88,17 @@ def webhook():
             reply_text(reply_token, f"🗑 ลบข้อมูล{' ' + item if item else ''} วันที่ {match.group(1)} แล้ว")
             return "ok", 200
 
-        # สรุปช่วงวันที่
+        # ✅ สรุปช่วงวันที่
         match_range = re.match(r"(\d{1,2} \w{3} \d{4})\s*-\s*(\d{1,2} \w{3} \d{4})", text)
         if match_range:
             try:
                 d1 = datetime.strptime(match_range.group(1), "%d %b %Y")
                 d2 = datetime.strptime(match_range.group(2), "%d %b %Y")
                 conn = sqlite3.connect("ingredients.db")
-                df = pd.read_sql_query("SELECT item, quantity, unit, date FROM ingredients WHERE date BETWEEN ? AND ?", conn, params=(d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d")))
+                df = pd.read_sql_query(
+                    "SELECT item, quantity, unit, date FROM ingredients WHERE date BETWEEN ? AND ?",
+                    conn, params=(d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d"))
+                )
                 conn.close()
 
                 if df.empty:
@@ -105,7 +119,7 @@ def webhook():
                 reply_text(reply_token, "❌ รูปแบบช่วงวันที่ไม่ถูกต้อง เช่น: 1 Jul 2025 - 31 Jul 2025")
                 return "ok", 200
 
-        # ตรวจสอบวัน
+        # ✅ ตรวจสอบวัน
         date_obj = parse_date(lines[0])
         if date_obj:
             lines = lines[1:]
@@ -115,6 +129,7 @@ def webhook():
         date_str = date_obj.strftime("%Y-%m-%d")
         date_display = date_obj.strftime("%d-%m-%Y")
 
+        # ✅ ตรวจสอบ pattern
         records = []
         skipped = []
         for line in lines:
@@ -146,13 +161,9 @@ def webhook():
         reply_text(reply_token, "\n".join(lines))
     return "ok", 200
 
-@app.route("/export")
-def export():
-    conn = sqlite3.connect("ingredients.db")
-    df = pd.read_sql_query("SELECT item, quantity, unit, date FROM ingredients ORDER BY date DESC", conn)
-    filename = "ingredients_export.xlsx"
-    df.to_excel(filename, index=False)
-    return send_file(filename, as_attachment=True)
+@app.route("/ingredients_export.xlsx")
+def download_excel():
+    return send_file("ingredients_export.xlsx", as_attachment=True)
 
 @app.route("/")
 def index():
