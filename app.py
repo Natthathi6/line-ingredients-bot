@@ -9,7 +9,7 @@ from collections import defaultdict
 
 app = Flask(__name__)
 LINE_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
-DOMAIN = os.environ.get("DOMAIN", "https://your-render-url.onrender.com")  # เปลี่ยนเป็น URL ของคุณ
+DOMAIN = "https://line-ingredients-bot.onrender.com"
 
 def reply_text(reply_token, text):
     headers = {
