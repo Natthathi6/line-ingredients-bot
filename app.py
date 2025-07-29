@@ -9,7 +9,7 @@ from collections import defaultdict
 
 app = Flask(__name__)
 LINE_TOKEN = os.environ.get("CHANNEL_ACCESS_TOKEN")
-DOMAIN = os.environ.get("DOMAIN", "https://your-render-url.com")  # <-- ใส่ domain ของคุณที่นี่
+DOMAIN = os.environ.get("DOMAIN", "https://your-render-url.onrender.com")  # เปลี่ยนเป็น URL ของคุณ
 
 def reply_text(reply_token, text):
     headers = {
@@ -55,14 +55,15 @@ def webhook():
         text = event["message"]["text"].strip()
         lines = text.split("\n")
 
-        # ✅ Export
+        # ✅ คำว่า export → ส่งลิงก์
         if text.lower() == "export":
             filename = "ingredients_export.xlsx"
             conn = sqlite3.connect("ingredients.db")
             df = pd.read_sql_query("SELECT item, quantity, unit, date FROM ingredients ORDER BY date DESC", conn)
             conn.close()
             df.to_excel(filename, index=False)
-            reply_text(reply_token, f"📎 ดาวน์โหลดวัตถุดิบ: {DOMAIN}/{filename}")
+            link = f"{DOMAIN}/export"
+            reply_text(reply_token, f"📎 ดาวน์โหลดวัตถุดิบ: {link}")
             return "ok", 200
 
         # ✅ ลบข้อมูล
@@ -129,7 +130,6 @@ def webhook():
         date_str = date_obj.strftime("%Y-%m-%d")
         date_display = date_obj.strftime("%d-%m-%Y")
 
-        # ✅ ตรวจสอบ pattern
         records = []
         skipped = []
         for line in lines:
@@ -161,9 +161,15 @@ def webhook():
         reply_text(reply_token, "\n".join(lines))
     return "ok", 200
 
-@app.route("/ingredients_export.xlsx")
-def download_excel():
-    return send_file("ingredients_export.xlsx", as_attachment=True)
+@app.route("/export")
+def export():
+    filename = "ingredients_export.xlsx"
+    if not os.path.exists(filename):
+        conn = sqlite3.connect("ingredients.db")
+        df = pd.read_sql_query("SELECT item, quantity, unit, date FROM ingredients ORDER BY date DESC", conn)
+        conn.close()
+        df.to_excel(filename, index=False)
+    return send_file(filename, as_attachment=True)
 
 @app.route("/")
 def index():
